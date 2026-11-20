@@ -109,7 +109,7 @@ runs:
 
         ACTOR_TG=$(get_tg_nick "$ACTOR")
         HEADER=""
-        DETAILS="${T_FROM}: <code>${ACTOR}</code> (${ACTOR_TG})"
+        DETAILS="${T_FROM}: <code>${ACTOR} (${ACTOR_TG})</code>"
 
         # 6. Определение события
         if [[ "$ACTION" == "opened" ]]; then
