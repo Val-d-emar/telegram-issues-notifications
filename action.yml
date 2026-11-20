@@ -1,0 +1,163 @@
+name: "Telegram Issues Notifications"
+description: "Telegram notifications for GitHub Issues events"
+author: "Val-d-emar"
+branding:
+  icon: "alert-circle"
+  color: "purple"
+
+inputs:
+  bot_token:
+    description: "Telegram Bot Token"
+    required: true
+  chat_id:
+    description: "Telegram Chat ID"
+    required: true
+  message_thread_id:
+    description: "Telegram Thread ID (if using supergroups with topics)"
+    required: false
+  user_map:
+    description: "Mapping of GitHub usernames to Telegram usernames (gh_nickname=tg_nickname)"
+    required: false
+  ignore_bots:
+    description: "Do not send notifications if the actor is a bot"
+    required: false
+    default: "true"
+  language:
+    description: "Language of the notification (ru / en)"
+    required: false
+    default: "ru"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Run Bash Issue Notification Logic
+      shell: bash
+      env:
+        TOKEN: ${{ inputs.bot_token }}
+        CHAT_ID: ${{ inputs.chat_id }}
+        THREAD_ID: ${{ inputs.message_thread_id }}
+        USER_MAP: ${{ inputs.user_map }}
+        IGNORE_BOTS: ${{ inputs.ignore_bots }}
+        LANG_SET: ${{ inputs.language }}
+
+        EVENT_NAME: ${{ github.event_name }}
+        ACTION: ${{ github.event.action }}
+        ACTOR: ${{ github.actor }}
+
+        ISSUE_NUM: ${{ github.event.issue.number }}
+        ISSUE_TITLE: ${{ github.event.issue.title }}
+        ISSUE_URL: ${{ github.event.issue.html_url }}
+        STATE_REASON: ${{ github.event.issue.state_reason }}
+        ASSIGNEE: ${{ github.event.assignee.login }}
+        LABELS: ${{ join(github.event.issue.labels.*.name, ', ') }}
+      run: |
+        # 1. Проверка на бота
+        if [[ "$IGNORE_BOTS" == "true" && "$ACTOR" == *"[bot]"* ]]; then
+            echo "Actor is a bot. Skipping."
+            exit 0
+        fi
+
+        # 2. Работаем только в контексте issues
+        if [[ "$EVENT_NAME" != "issues" || -z "$ISSUE_NUM" ]]; then
+            echo "Not an issue context. Skipping."
+            exit 0
+        fi
+
+        # 3. Экранирование HTML-спецсимволов для Telegram parse_mode=HTML
+        escape_html() {
+            local s="$1"
+            s="${s//&/&amp;}"
+            s="${s//</&lt;}"
+            s="${s//>/&gt;}"
+            echo "$s"
+        }
+
+        # 4. Маппинг GitHub -> Telegram ника
+        get_tg_nick() {
+            local gh_name=$(echo "$1" | tr '[:upper:]' '[:lower:]' | xargs)
+            if [ -z "$USER_MAP" ]; then echo "@$1"; return; fi
+
+            local found=$(echo "$USER_MAP" | grep -i "^${gh_name}=" | cut -d'=' -f2 | xargs)
+            if [ -n "$found" ]; then
+                [[ "$found" != @* ]] && found="@$found"
+                echo "$found"
+            else
+                echo "@$1"
+            fi
+        }
+
+        # 5. Локализация
+        if [[ "$LANG_SET" == "en" ]]; then
+            T_OPENED="🆕 <b>New Issue</b>"
+            T_REOPENED="♻️ <b>Issue Reopened</b>"
+            T_CLOSED="✅ <b>Issue Closed</b>"
+            T_CLOSED_NOT_PLANNED="🚫 <b>Issue Closed (Not Planned)</b>"
+            T_ASSIGNED="📌 <b>Issue Assigned</b>"
+            T_FROM="👤 By"
+            T_ASSIGNEE="🛠 Assignee"
+            T_LABELS="🏷 Labels"
+        else
+            T_OPENED="🆕 <b>Новая задача (Issue)</b>"
+            T_REOPENED="♻️ <b>Задача переоткрыта</b>"
+            T_CLOSED="✅ <b>Задача закрыта</b>"
+            T_CLOSED_NOT_PLANNED="🚫 <b>Задача закрыта (не планируется)</b>"
+            T_ASSIGNED="📌 <b>Назначен исполнитель задачи</b>"
+            T_FROM="👤 От"
+            T_ASSIGNEE="🛠 Исполнитель"
+            T_LABELS="🏷 Метки"
+        fi
+
+        ACTOR_TG=$(get_tg_nick "$ACTOR")
+        HEADER=""
+        DETAILS="${T_FROM}: <code>${ACTOR}</code> (${ACTOR_TG})"
+
+        # 6. Определение события
+        if [[ "$ACTION" == "opened" ]]; then
+            HEADER="$T_OPENED"
+        elif [[ "$ACTION" == "reopened" ]]; then
+            HEADER="$T_REOPENED"
+        elif [[ "$ACTION" == "closed" ]]; then
+            if [[ "$STATE_REASON" == "not_planned" ]]; then
+                HEADER="$T_CLOSED_NOT_PLANNED"
+            else
+                HEADER="$T_CLOSED"
+            fi
+        elif [[ "$ACTION" == "assigned" ]]; then
+            if [[ -z "$ASSIGNEE" ]]; then exit 0; fi
+            ASSIGNEE_TG=$(get_tg_nick "$ASSIGNEE")
+            HEADER="$T_ASSIGNED"
+            DETAILS="${DETAILS}\n${T_ASSIGNEE}: <b>${ASSIGNEE_TG}</b>"
+        else
+            echo "Unhandled issue action: $ACTION"
+            exit 0
+        fi
+
+        if [[ -n "$LABELS" ]]; then
+            SAFE_LABELS=$(escape_html "$LABELS")
+            DETAILS="${DETAILS}\n${T_LABELS}: <code>${SAFE_LABELS}</code>"
+        fi
+
+        SAFE_TITLE=$(escape_html "$ISSUE_TITLE")
+        MESSAGE=$(echo -e "${HEADER}\n${DETAILS}\n\n📌 <a href=\"${ISSUE_URL}\">Issue #${ISSUE_NUM}: ${SAFE_TITLE}</a>")
+
+        # 7. Отправка в Telegram
+        CURL_ARGS=(
+            -s -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage"
+            -d "chat_id=${CHAT_ID}"
+            -d "parse_mode=HTML"
+            -d "disable_web_page_preview=true"
+            --data-urlencode "text=$MESSAGE"
+        )
+
+        if [[ -n "$THREAD_ID" ]]; then
+            CURL_ARGS+=(-d "message_thread_id=${THREAD_ID}")
+        fi
+
+        HTTP_RESPONSE=$(curl -w "%{http_code}" -o /dev/null "${CURL_ARGS[@]}")
+
+        if [[ "$HTTP_RESPONSE" != "200" ]]; then
+            echo "Error sending Telegram message! HTTP code: $HTTP_RESPONSE"
+            exit 1
+        fi
+
+        echo "Issue notification successfully sent."
