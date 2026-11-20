@@ -107,9 +107,9 @@ runs:
             T_LABELS="🏷 Метки"
         fi
 
-        ACTOR_TG=$(get_tg_nick "$ACTOR")
+        # ACTOR_TG=$(get_tg_nick "$ACTOR")
         HEADER=""
-        DETAILS="${T_FROM}: <code>${ACTOR} (${ACTOR_TG})</code>"
+        DETAILS="${T_FROM}: <code>${ACTOR}</code>"
 
         # 6. Определение события
         if [[ "$ACTION" == "opened" ]]; then
